@@ -1,0 +1,7 @@
+ddp_hostname = delphixengine
+username = delphix_admin
+password = changeme
+skip-validate = 1
+filename = /var/lib/pgsql/.ssh/authorized_keys
+toolkit_path = /var/lib/pgsql/toolkit
+environment_user = postgres
