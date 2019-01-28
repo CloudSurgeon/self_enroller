@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/jessevdk/go-flags"
 	log "github.com/sirupsen/logrus"
@@ -21,40 +22,51 @@ type Options struct {
 	ToolKitPath        string               `long:"toolkit_path" env:"TOOLKIT_PATH" description:"The path for the toolkit that resides on the host" required:"true"`
 	EnvironmentUser    string               `long:"environment_user" env:"ENVIRONMENT_USER" description:"The OS username to use for the environment" required:"true"`
 	EnvironmentAddress string               `long:"environment_address" env:"ENVIRONMENT_ADDRESS" description:"optional: The address associated with the host."`
+	RetryBadPass       bool                 `long:"retry-badpass" env:"RETRY_BAD_PASS" description:"Retry connection on bad password response (useful for waiting on new engine config)"`
 }
 
-func (c *Client) getSshPublicKey() (key string) {
-	systemObj := c.httpGet("/system")
+func (c *Client) getSSHPublicKey() (key string, err error) {
+	systemObj, err := c.httpGet("/system")
+	if err != nil {
+		return key, err
+	}
 
 	key, ok := systemObj["result"].(map[string]interface{})["sshPublicKey"].(string) //grab the object reference
 	if !ok {
-		log.Fatalf("Did not find the sshPublicKey. Something went terribly wrong")
+		err = fmt.Errorf("Did not find the sshPublicKey. Something went terribly wrong")
+		return key, err
 	}
-	return key
+	return key, err
 
 }
 
-func writeFile(filename, filetext string) {
+func writeFile(filename, filetext string) (err error) {
 	var f *os.File
-	var err error
 
 	f, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	defer f.Close()
 
 	if _, err = f.WriteString(filetext); err != nil {
-		panic(err)
+		return err
 	}
+	return err
 }
 
-func (c *Client) writeDelphixPublicKey(filename string) {
-	key := c.getSshPublicKey()
-	writeFile(filename, key)
+func (c *Client) writeDelphixPublicKey(filename string) (err error) {
+	key, err := c.getSSHPublicKey()
+	if err != nil {
+		return err
+	}
+	err = writeFile(filename, key)
+	if err != nil {
+		return err
+	}
 	log.Infof("Delphix DDP key written to %s", filename)
-
+	return err
 }
 
 func createHostEnvironmentCreateParameters(userName, environmentName, hostAddress, toolkitPath string) string {
@@ -82,13 +94,37 @@ func createHostEnvironmentCreateParameters(userName, environmentName, hostAddres
 }`, userName, environmentName, hostAddress, toolkitPath)
 }
 
-func (c *Client) addEnvironment(userName, environmentName, hostAddress, toolkitPath string) {
-	if envObj := c.findObjectByName("environment", environmentName); envObj == nil {
-		log.Debug("%s", createHostEnvironmentCreateParameters(userName, environmentName, hostAddress, toolkitPath))
-		c.jobWaiter(c.httpPost("environment", createHostEnvironmentCreateParameters(userName, environmentName, hostAddress, toolkitPath)))
+func (c *Client) addEnvironment(userName, environmentName, hostAddress, toolkitPath string) (results map[string]interface{}, err error) {
+	if envObj, err := c.findObjectByName("environment", environmentName); envObj == nil && err == nil {
+		log.Debugf("%s", createHostEnvironmentCreateParameters(userName, environmentName, hostAddress, toolkitPath))
+		action, err := c.httpPost("environment", createHostEnvironmentCreateParameters(userName, environmentName, hostAddress, toolkitPath))
+		if err != nil {
+			switch err.(type) {
+			case *RespError:
+				if err.(*RespError).ErrorID() == "exception.executor.object.exists" {
+					log.Warn("Possibly encountered https://jira.delphix.com/browse/DLPX-46621, trying again in 5 seconds")
+					time.Sleep(time.Duration(5) * time.Second)
+					action, err = c.httpPost("environment", createHostEnvironmentCreateParameters(userName, environmentName, hostAddress, toolkitPath))
+					if err == nil {
+						break
+					}
+				}
+				log.Fatal(err)
+			default:
+				log.Fatal("What the h* just happened?")
+			}
+		}
+		err = c.jobWaiter(action)
+		if err != nil {
+			return nil, err
+		}
+		return action, err
+	} else if err != nil {
+		return nil, err
 	} else {
 		log.Warnf("%s already exists", environmentName)
 	}
+	return nil, err
 }
 
 var (
@@ -107,21 +143,32 @@ func main() {
 	log.Info("Establishing session and logging in")
 	client := NewClient(opts.UserName, opts.Password, fmt.Sprintf("https://%s/resources/json/delphix", opts.DDPName))
 	client.initResty()
-	err = client.waitForEngineReady(10, 600)
+
+	// err = client.waitForEngineReady(10, 600)
+	err = client.LoadAndValidate()
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	log.Info("Successfully Logged in")
-	client.writeDelphixPublicKey(string(opts.KeyFile))
+	err = client.writeDelphixPublicKey(string(opts.KeyFile))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if hostname = opts.EnvironmentName; hostname == "" {
 		hostname, err = os.Hostname()
 		if err != nil {
-			panic(err)
+			log.Fatal(err)
 		}
 	}
 	if address = opts.EnvironmentAddress; address == "" {
 		address = hostname
 	}
-	client.addEnvironment(opts.EnvironmentUser, address, hostname, opts.ToolKitPath)
+	_, err = client.addEnvironment(opts.EnvironmentUser, address, hostname, opts.ToolKitPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	log.Info("Complete")
 }

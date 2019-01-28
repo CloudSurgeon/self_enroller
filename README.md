@@ -1,5 +1,5 @@
 
-# Automation Framework Demo Application
+# Automatic Self Enroller
 
 #### Table of Contents
 1.  [Description](#description)
@@ -14,12 +14,11 @@
 7.  [License](#license)
 
 ## <a id="description"></a>Description
-This script/binary will wait for an engine to be ready, and then add the host to the engine. Intended to be embedded in images so they can self-enroll on boot.
+This script/binary will wait for an engine to be ready, and then add the host to the engine. Intended to be embedded in images so they can self-enroll on boot. Just create a job that executes this upon boot. (I user an @reboot conjob as the program gracefully exits if the environment already exists).
 
 Currently only works for UnixHost with passwordless SSH. 
 
 ## <a id="options"></a>Options for the script
-type Options struct {
 	DDPName            string               `short:"e" long:"ddp_hostname" env:"DELPHIX_DDP_HOSTNAME" description:"The hostname or IP address of the Delphix Dynamic Data Platform" required:"true"`
 	UserName           string               `short:"u" long:"username" env:"DELPHIX_USER" description:"The username used to authenticate to the Delphix Engine" required:"true"`
 	Password           string               `short:"p" long:"password" env:"DELPHIX_PASS" description:"The password used to authenticate to the Delphix Engine" required:"true"`
@@ -31,16 +30,15 @@ type Options struct {
 	ToolKitPath        string               `long:"toolkit_path" env:"TOOLKIT_PATH" description:"The path for the toolkit that resides on the host" required:"true"`
 	EnvironmentUser    string               `long:"environment_user" env:"ENVIRONMENT_USER" description:"The OS username to use for the environment" required:"true"`
 	EnvironmentAddress string               `long:"environment_address" env:"ENVIRONMENT_ADDRESS" description:"optional: The address associated with the host."`
-}
 
 ## <a id="example"></a>Example config file
-ddp_hostname = delphixengine
-username = delphix_admin
-password = landshark
-skip-validate = 1
-filename = /var/lib/pgsql/.ssh/authorized_keys
-toolkit_path = /var/lib/pgsql/toolkit
-environment_user = postgres
+	ddp_hostname = delphixengine
+	username = delphix_admin
+	password = landshark
+	skip-validate = 1
+	filename = /var/lib/pgsql/.ssh/authorized_keys
+	toolkit_path = /var/lib/pgsql/toolkit
+	environment_user = postgres
 
 ## <a id="contribute"></a>Contribute
 

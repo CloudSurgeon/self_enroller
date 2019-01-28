@@ -17,6 +17,26 @@ import (
 	resty "gopkg.in/resty.v1"
 )
 
+// type APIError struct {
+// 	msg           string
+// 	details       string
+// 	action        string
+// 	id            string
+// 	commandOutput string
+// }
+
+// func (err APIError) Details() string {
+// 	return err.details
+// }
+
+// func (err APIError) ID() string {
+// 	return err.id
+// }
+
+// func (err APIError) CommandOutput() string {
+// 	return err.commandOutput
+// }
+
 func init() {
 	log.Infof("Version: %v", version)
 	optionStuff()
@@ -152,15 +172,6 @@ type Client struct {
 	version                 *APIVersionStruct
 }
 
-// ErrorStruct is the struct of a resty error
-type ErrorStruct struct {
-	Type          string `json:"type,omitempty"`
-	Details       string `json:"details,omitempty"`
-	ID            string `json:"id,omitempty"`
-	CommandOutput string `json:"commandOutput,omitempty"`
-	Diagnosis     string `json:"diagnosis,omitempty"`
-}
-
 // LoginRequestStruct - Represents a Delphix user authentication request.
 // extends TypedObject
 type LoginRequestStruct struct {
@@ -184,13 +195,6 @@ type LoginRequestStruct struct {
 	// The username of the user to authenticate.
 	// required = true
 	Username string `json:"username,omitempty"`
-}
-
-// RespError holds the resty response failure message
-type RespError struct {
-	Type        string `json:"type,omitempty"`
-	Status      string `json:"status,omitempty"`
-	ErrorStruct `json:"error,omitempty"`
 }
 
 // NewClient creates a new client object
@@ -243,11 +247,43 @@ func (c *Client) LoadAndValidate() error {
 	if err != nil {
 		return err
 	}
-	parseHTTPResponse(resp)
+
+	if http.StatusUnauthorized == resp.StatusCode() {
+		err = fmt.Errorf("%d", http.StatusUnauthorized)
+		if err != nil {
+			return err
+		}
+	}
+	parseHTTPResponseReturnMap(resp)
 	return nil
 }
 
-func bodyToJson(v interface{}) string {
+// MaskingLoadAndValidate establishes a new client connection
+func (c *Client) MaskingLoadAndValidate() error {
+
+	resp, err := resty.R().
+		SetResult(AuthSuccess{}).
+		SetBody(`{
+			"username": "Admin",
+			"password": "Admin-12"
+			}`).
+		Post(c.url + "/login")
+	if err != nil {
+		return err
+	}
+	logger.Debug(resp)
+	resultdat, err := parseHTTPResponseReturnMap(resp)
+	if err != nil {
+		return err
+	}
+
+	if auth, _ := resultdat["Authorization"].(string); auth != "" {
+		resty.SetHeader("Authorization", auth)
+	}
+	return nil
+}
+
+func bodyToJSON(v interface{}) string {
 	switch v := v.(type) {
 	case string:
 		return string(v)
@@ -278,16 +314,17 @@ func (c *Client) initResty() {
 	if len(opts.Debug) >= 3 {
 		resty.OnBeforeRequest(func(c *resty.Client, req *resty.Request) error {
 			var requestdat map[string]interface{}
-			strbody := bodyToJson(req.Body)
+			strbody := bodyToJSON(req.Body)
 			err := json.Unmarshal([]byte(strbody), &requestdat)
 			if err == nil {
-				if requestdat["type"].(string) == "ERROR" {
+				requestType, _ := requestdat["type"].(string)
+				if requestType == "ERROR" {
 					errorMessage := string(req.Body.(string))
 					err := fmt.Errorf(errorMessage)
 					if err != nil {
 						return err
 					}
-				} else if requestdat["type"].(string) == "LoginRequest" {
+				} else if requestType == "LoginRequest" {
 					strbody = fmt.Sprintf("{\"type\": \"LoginRequest\",\"username\": \"%s\",\"password\": \"<redacted>\"}", requestdat["username"])
 				}
 			}
@@ -347,7 +384,7 @@ func CreateAPIVersionFromString() (APIVersionStruct, error) {
 	return CreateAPIVersion(maj, min, mic)
 }
 
-func (c *Client) httpPost(url, body string, params ...string) map[string]interface{} {
+func (c *Client) httpPost(url, body string, params ...string) (map[string]interface{}, error) {
 
 	postURL := c.assembleURL(url, params)
 	// postURL := fmt.Sprintf("%s/%s", c.url, url)
@@ -359,76 +396,191 @@ func (c *Client) httpPost(url, body string, params ...string) map[string]interfa
 		log.Fatal(err)
 	}
 
-	return parseHTTPResponse(resp)
+	return parseHTTPResponseReturnMap(resp)
 }
 
-func (c *Client) httpGet(url string, params ...string) map[string]interface{} {
+func (c *Client) httpPut(url, body string, params ...string) (map[string]interface{}, error) {
+
+	putURL := c.assembleURL(url, params)
+	logger.WithField("url", putURL)
+	resp, err := resty.R().
+		SetBody(body).
+		Put(putURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return parseHTTPResponseReturnMap(resp)
+}
+
+func (c *Client) httpPostBytesReturnSlice(url string, file []byte, params ...string) ([]interface{}, error) {
+
+	postURL := c.assembleURL(url, params)
+	// postURL := fmt.Sprintf("%s/%s", c.url, url)
+	logger.WithField("url", postURL)
+	resp, err := resty.R().
+		SetBody(file).
+		Post(postURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return parseHTTPResponseReturnSlice(resp)
+}
+
+func (c *Client) httpGet(url string, params ...string) (map[string]interface{}, error) {
 	getURL := c.assembleURL(url, params)
 	logger.WithField("url", getURL)
 	resp, err := resty.R().
 		Get(getURL)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
-	return parseHTTPResponse(resp)
+	return parseHTTPResponseReturnMap(resp)
 }
 
-func parseHTTPResponse(resp *resty.Response) map[string]interface{} {
+func parseHTTPResponse(resp *resty.Response) ([]byte, error) {
 	var err error
-	var resultdat map[string]interface{}
 
 	if http.StatusOK != resp.StatusCode() {
 		err = fmt.Errorf("Got an HTTP Status of %v instead of %v\n%v", resp.StatusCode(), http.StatusOK, resp)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 	}
-	result := resp.Body()
-	if err = json.Unmarshal(result, &resultdat); err != nil { //convert the json to go objects
-		log.Fatal(err)
-	}
-
-	if resultdat["status"].(string) == "ERROR" {
-		errorMessage := string(result)
-		err = fmt.Errorf(errorMessage)
-		log.Fatal(err)
-	}
-	return resultdat
+	return resp.Body(), nil
 }
 
-func (c *Client) jobWaiter(actionList ...map[string]interface{}) {
-	if actionList == nil {
-		logger.Warnln("No jobs passed to jobWaiter")
+func parseHTTPResponseReturnMap(resp *resty.Response) (resultdat map[string]interface{}, err error) {
+	result, err := parseHTTPResponse(resp)
+	if err != nil {
+		return nil, err
 	}
+	if err = json.Unmarshal(result, &resultdat); err != nil { //convert the json to go objects
+		return nil, err
+	}
+
+	if status, _ := resultdat["status"].(string); status == "ERROR" {
+		return nil, NewErrorStruct(resultdat)
+	}
+	return resultdat, err
+}
+
+func (err RespError) Error() string {
+	return fmt.Sprintf("type:%s, status:%s, error: { type:%s, id:%s, details%s}", err.Type, err.Status, err.ErrorStruct.Type, err.ErrorStruct.ID, err.ErrorStruct.Details)
+}
+
+func (err RespError) ErrorID() string {
+	return fmt.Sprintf(err.ErrorStruct.ID)
+}
+
+func NewErrorStruct(resultMap map[string]interface{}) *RespError {
+	return &RespError{
+		Type:   resultMap["type"].(string),
+		Status: resultMap["status"].(string),
+		ErrorStruct: ErrorStruct{
+			Type:    resultMap["error"].(map[string]interface{})["type"].(string),
+			Details: resultMap["error"].(map[string]interface{})["details"].(string),
+			ID:      resultMap["error"].(map[string]interface{})["id"].(string),
+			// CommandOutput: resultMap["error"].(map[string]interface{})["commandoutput"].(string),
+			// Diagnosis:     resultMap["error"].(map[string]interface{})["diagnoses"].(string),
+		},
+	}
+}
+
+// RespError holds the delphix failure message
+type RespError struct {
+	Type        string `json:"type,omitempty"`
+	Status      string `json:"status,omitempty"`
+	ErrorStruct `mapstructure:",squash"`
+}
+
+// ErrorStruct is the struct of a resty error
+type ErrorStruct struct {
+	Type          string `json:"type,omitempty"`
+	Details       string `json:"details,omitempty"`
+	ID            string `json:"id,omitempty"`
+	CommandOutput string `json:"commandOutput,omitempty"`
+	Diagnosis     string `json:"diagnosis,omitempty"`
+}
+
+func parseHTTPResponseReturnSlice(resp *resty.Response) (resultdat []interface{}, err error) {
+	result, err := parseHTTPResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(result, &resultdat); err != nil { //convert the json to go objects
+		return nil, err
+	}
+
+	return resultdat, nil
+}
+
+func (c *Client) jobWaiter(actionList ...map[string]interface{}) error {
+	if actionList == nil {
+		logger.Debug("No jobs passed to jobWaiter")
+	}
+	logger.Debugf("Action list: %v", actionList)
 	for _, v := range actionList {
 		jobLogger := logger.WithFields(log.Fields{
 			"url":    fmt.Sprintf("%s/job/%s", c.url, v["job"]),
 			"action": v["action"],
 			"job":    v["job"],
 		})
-		for {
-			jobObj := c.httpGet(fmt.Sprintf("job/%s", v["job"]))["result"].(map[string]interface{})
-			jobLogger.Infof("%g%s complete", jobObj["percentComplete"], "%")
-			if jobState := jobObj["jobState"].(string); jobState == "RUNNING" {
-				jobLogger.Debug(c.listObjects("notification", fmt.Sprintf("channel=%s", jobObj["reference"])))
-			} else {
-				if jobState != "COMPLETED" {
-					jobLogger.Fatal(jobState)
+		jobLogger.Debugf("acting on %v", v)
+		if v["job"] != nil {
+			for {
+
+				jobObj, err := c.httpGet(fmt.Sprintf("job/%s", v["job"]))
+				if err != nil {
+					return err
 				}
-				break
+				jobResult := jobObj["result"].(map[string]interface{})
+				jobLogger.Infof("%g%s complete", jobResult["percentComplete"], "%")
+				if jobState := jobResult["jobState"].(string); jobState == "RUNNING" {
+					jobLogger.Debug(c.listObjects("notification", fmt.Sprintf("channel=%s", jobResult["reference"])))
+				} else {
+					if jobState != "COMPLETED" {
+						jobLogger.Fatal(jobState)
+					}
+					jobLogger.Info(jobState)
+					break
+				}
+			}
+		} else {
+			for {
+				jobLogger := logger.WithFields(log.Fields{
+					"url":    fmt.Sprintf("%s/action/%s", c.url, v["action"]),
+					"action": v["action"],
+				})
+				actionObj, err := c.httpGet(fmt.Sprintf("action/%s", v["action"]))
+				if err != nil {
+					return err
+				}
+				actionResult := actionObj["result"].(map[string]interface{})
+				jobLogger.Infof("Waiting for action to complete")
+				if actionState := actionResult["state"].(string); actionState == "EXECUTING" || actionState == "WAITING" {
+					jobLogger.Debug(c.listObjects("notification", fmt.Sprintf("channel=%s", v["action"])))
+				} else {
+					if actionState != "COMPLETED" {
+						jobLogger.Fatal(actionState)
+					}
+					jobLogger.Info(actionState)
+					break
+				}
 			}
 		}
 	}
-
+	return nil
 }
 
 // WaitForEngineReady loops until the Client connection is successful or time (t) expires
 func (c *Client) waitForEngineReady(p int, t int) error {
 
-	logger.Printf("Waiting up to %v seconds for the DDDP to be ready\n", t)
+	logger.Infof("Waiting up to %v seconds for the DDDP to be ready", t)
 	timeOut := 0
 	for timeOut < t {
-		fmt.Println("Waiting for Delphix DDP")
+		logger.Info("Waiting for Delphix DDP")
 		time.Sleep(time.Duration(p) * time.Second)
 		timeOut = timeOut + p
 		if err := c.LoadAndValidate(); err == nil {
@@ -436,4 +588,27 @@ func (c *Client) waitForEngineReady(p int, t int) error {
 		}
 	}
 	return nil
+}
+
+// WaitForMaskingEngineReady loops until the Client connection is successful or time (t) expires
+func (c *Client) waitForMaskingEngineReady(p int, t int) error {
+	logger := logger.WithFields(log.Fields{
+		"url":      c.url,
+		"username": c.username,
+	})
+	logger.Infof("Waiting up to %v seconds for the DDDP to be ready", t)
+	timeOut := 0
+	for timeOut < t {
+		logger.Info("Waiting for Delphix DDP Masking Engine")
+		time.Sleep(time.Duration(p) * time.Second)
+		timeOut = timeOut + p
+		if err := c.MaskingLoadAndValidate(); err == nil {
+			break
+		}
+	}
+	return nil
+}
+
+func returnObjReference(obj map[string]interface{}, errIn error) (reference interface{}, errOut error) {
+	return obj["reference"], errIn
 }
