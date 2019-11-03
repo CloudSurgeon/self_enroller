@@ -13,7 +13,8 @@ local-debug:
 build:
 	echo $$GOPATH
 	go get -d
-	env GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=v0.3-alpha" -v -o ./bin/linux64/self_enroll_linux_x64
+	env GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=v0.3" -v -o ./bin/linux64/self_enroll_linux_x64
+	tar -czvf ./bin/linux64/self_enroll_linux_x64_v0.3.tgz ./bin/linux64/self_enroll_linux_x64
 
 deploy: build
 	rsync -arv conf.txt centos@proddb:.
