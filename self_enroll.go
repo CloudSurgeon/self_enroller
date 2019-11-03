@@ -165,7 +165,7 @@ func main() {
 	if address = opts.EnvironmentAddress; address == "" {
 		address = hostname
 	}
-	_, err = client.addEnvironment(opts.EnvironmentUser, address, hostname, opts.ToolKitPath)
+	_, err = client.addEnvironment(opts.EnvironmentUser, hostname, address, opts.ToolKitPath)
 	if err != nil {
 		log.Fatal(err)
 	}
